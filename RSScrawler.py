@@ -54,6 +54,7 @@ import logging
 import os
 import multiprocessing
 from multiprocessing import Process
+import pycurl
 
 # Lokales
 from rssconfig import RssConfig
@@ -249,7 +250,7 @@ class MB():
     # Suchfunktion für Downloadlinks (auf der zuvor gefundenen Unterseite):
     def _get_download_links(self, url, hosters_pattern=None):
         # Verhindere Überforderung des Servers
-        time.sleep(0.5)
+        time.sleep(0.1)
         # Definiere die zu durchsuchende Baumstruktur (auf Basis der Unterseite)
         tree = html.fromstring(requests.get(url).content)
         # Genaue Anweisung, wo die Links zu finden sind (Unterhalb des Download:/Mirror # Textes)
@@ -507,7 +508,7 @@ class MB3d():
     # Suchfunktion für Downloadlinks (auf der zuvor gefundenen Unterseite):
     def _get_download_links(self, url, hosters_pattern=None):
         # Verhindere Überforderung des Servers
-        time.sleep(0.5)
+        time.sleep(0.1)
         # Definiere die zu durchsuchende Baumstruktur (auf Basis der Unterseite)
         tree = html.fromstring(requests.get(url).content)
         # Genaue Anweisung, wo die Links zu finden sind (Unterhalb des Download:/Mirror # Textes)
@@ -768,7 +769,7 @@ class MBstaffeln():
     # Suchfunktion für Downloadlinks (auf der zuvor gefundenen Unterseite):
     def _get_download_links(self, url, hosters_pattern=None):
         # Verhindere Überforderung des Servers
-        time.sleep(0.5)
+        time.sleep(0.1)
         # Definiere die zu durchsuchende Baumstruktur (auf Basis der Unterseite)
         tree = html.fromstring(requests.get(url).content)
         # Genaue Anweisung, wo die Links zu finden sind (Unterhalb des Download:/Mirror # Textes)
@@ -983,7 +984,7 @@ class MBregex():
     # Suchfunktion für Downloadlinks (auf der zuvor gefundenen Unterseite):
     def _get_download_links(self, url, hosters_pattern=None):
         # Verhindere Überforderung des Servers
-        time.sleep(0.5)
+        time.sleep(0.1)
         # Definiere die zu durchsuchende Baumstruktur (auf Basis der Unterseite)
         tree = html.fromstring(requests.get(url).content)
         # Genaue Anweisung, wo die Links zu finden sind (Unterhalb des Download:/Mirror # Textes)
@@ -1542,6 +1543,282 @@ class YouTube():
         if len(text) > 0 and len(rsscrawler.get("pushbulletapi")) > 0:
             # Löse Pushbullet-Benachrichtigung aus
             common.Pushbullet(rsscrawler.get("pushbulletapi"),text)
+            
+class WW():
+    FEED_URL = "aHR0cDovL3dhcmV6LXdvcmxkLm9yZy9mZWVkLw==".decode('base64')
+    MAG_URL = ""
+    SUBSTITUTE = "[&#\s/]"
+    # Vorerst ungenutzt, da die MB Einstellungen für Filme "global" gelten
+    _INTERNAL_NAME='MB'
+
+    def __init__(self):
+        self.config = RssConfig(self._INTERNAL_NAME)
+        self.log_info = logging.info
+        self.log_error = logging.error
+        self.log_debug = logging.debug
+        self.magazindb = RssDb(os.path.join(os.path.dirname(sys.argv[0]), "Einstellungen/Downloads/WW_Downloads.db"))
+        self.magazinliste = os.path.join(os.path.dirname(sys.argv[0]), 'Einstellungen/Listen/WW_Magazine.txt')
+        self.db = RssDb(os.path.join(os.path.dirname(sys.argv[0]), "Einstellungen/Downloads/MB_Downloads.db"))
+        self.filme = os.path.join(os.path.dirname(sys.argv[0]), 'Einstellungen/Listen/MB_Filme.txt')
+        self._hosters_pattern = rsscrawler.get('hoster').replace(',','|')
+        self._periodical_active = False
+        self.periodical = RepeatableTimer(
+            int(rsscrawler.get('interval')) * 60,
+            self.periodical_task
+        )
+        self.dictWithNamesAndLinks = {}
+
+    def activate(self):
+        self._periodical_active = True
+        self.periodical.start()
+        return self
+
+    def readInput(self, file):
+        if not os.path.isfile(file):
+            open(file, "a").close()
+            placeholder = open(file, 'w')
+            placeholder.write('XXXXXXXXXX')
+            placeholder.close()
+        try:
+            f = codecs.open(file, "rb")
+            return f.read().splitlines()
+        except:
+            self.log_error("Liste nicht gefunden!")
+
+    def getPatterns(self, patterns, quality, rg, sf):
+        # Importiere globale Parameter (sollten beide Falsch sein)
+        global placeholder_filme
+        # Wenn Liste exakt die Platzhalterzeile enthält:
+        if patterns == ["XXXXXXXXXX"]:
+            # Wenn keine Information zur Quellart weitergegeben wurde (gilt nur bei Staffeln, Standard ist: BluRay):
+            # Logge vorhandenen Platzhalter, der in der Filme-Liste stehen muss (da keine Quellart angegeben)
+            self.log_debug("Liste enthält Platzhalter. Stoppe Suche für Filme!")
+            # Setze globale Variable auf wahr, um in der MB-Klasse die Suche abbrechen zu können
+            placeholder_filme = True
+        # Ansonsten gib die Zeilen einzeln als Zeilen in patters zurück
+        return {line: (quality, rg, sf) for line in patterns}
+
+    def searchLinks(self, feed):
+        ignore = "|".join(["\.%s(\.|-)" % p for p in self.config.get("ignore").lower().split(',')]) if not self.config.get("ignore") == "" else "^unmatchable$"
+        
+        for key in self.allInfos:
+            s = re.sub(self.SUBSTITUTE,".",key).lower()
+            for post in feed.entries:
+                """Suche nach Titel"""
+                found = re.search(s,post.title.lower())
+                if found:
+                    """Prüfe ob Release ignoriert werden soll (basierend auf ignore-Einstellung)"""
+                    found = re.search(ignore,post.title.lower())
+                    if found:
+                        # Wenn zu ignorierender Eintrag, logge diesen
+                        self.log_debug("%s - Release ignoriert (basierend auf ignore-Einstellung)" %post.title)
+                        continue
+                    """Suche nach Qualität"""
+                    ss = self.allInfos[key][0].lower()
+
+
+                    if ss == "480p":
+                        if "720p" in post.title.lower() or "1080p" in post.title.lower() or "1080i" in post.title.lower():
+                            continue
+                        found = True
+                    else:
+                        found = re.search(ss,post.title.lower())
+                    if found:
+                        # Funktion, die Listeneinträge wie folgt erwartet: Titel,Auflösung,Gruppe
+                        """Suche nach Release-Gruppe"""
+                        sss = "[\.-]+"+self.allInfos[key][1].lower()
+                        found = re.search(sss,post.title.lower())
+
+                        if self.allInfos[key][2]:
+                            # Wenn alles True, dann found = True (also gilt Release nur als gefunden, wenn alle Parameter wahr sind)
+                            found = all([word in post.title.lower() for word in self.allInfos[key][2]])
+
+                        if found:
+                            # Check, ob das Release zu einer Serie gehört
+                            try:
+                                episode = re.search(r'([\w\.\s]*s\d{1,2}e\d{1,2})[\w\.\s]*',post.title.lower()).group(1)
+                                if "repack" in post.title.lower():
+                                    episode = episode + "-repack"
+                                self.log_debug("Serie entdeckt. Kürze Titel: [%s]" %episode)
+                                yield (episode, [post.link], key)
+                            except:
+                                # Gebe den Link (der alle obigen Checks bestandend hat) weiter
+                                yield (post.title, [post.link], key)
+
+
+    def download_dl(self, title):
+        # Schreibe den nicht-zweisprachigen Titel für die folgende Suche um
+        text = []
+        # Dies generiert den in die Suche einfügbaren String (+ statt Leerzeichen)
+        search_title = title.replace(".German.720p.", ".German.DL.1080p.").replace(".German.DTS.720p.", ".German.DTS.DL.1080p.").replace(".German.AC3.720p.", ".German.AC3.DL.1080p.").replace(".German.AC3LD.720p.", ".German.AC3LD.DL.1080p.").replace(".German.AC3.Dubbed.720p.", ".German.AC3.Dubbed.DL.1080p.").split('.x264-', 1)[0].split('.h264-', 1)[0].replace(".", " ").replace(" ", "+")
+        search_url = "aHR0cDovL3dhcmV6LXdvcmxkLm9yZy9mZWVk".decode('base64') + search_title
+        # Nach diesem String (also Releasetitel) wird schlussendlich in den Suchergebnissen gesucht (. statt Leerzeichen)
+        feedsearch_title = title.replace(".German.720p.", ".German.DL.1080p.").replace(".German.DTS.720p.", ".German.DTS.DL.1080p.").replace(".German.AC3.720p.", ".German.AC3.DL.1080p.").replace(".German.AC3LD.720p.", ".German.AC3LD.DL.1080p.").replace(".German.AC3.Dubbed.720p.", ".German.AC3.Dubbed.DL.1080p.").split('.x264-', 1)[0].split('.h264-', 1)[0]
+        if not '.dl.' in feedsearch_title.lower():
+            self.log_debug("%s - Release ignoriert (nicht zweisprachig, da wahrscheinlich nicht Retail)" %feedsearch_title)
+            return
+        
+        # Suche nach title im Ergebnisfeed der obigen Suche (nicht nach dem für die suche genutzten search_title)
+        for (key, value, pattern) in self.dl_search(feedparser.parse(search_url), feedsearch_title, title):
+            # Nimm nur den ersten validen Downloadlink der auf der Unterseite eines jeden Releases gefunden wurde
+            download_link = common.get_first(self._get_download_links(value[0], self._hosters_pattern))
+            # Füge Release nur hinzu, wenn überhaupt ein Link gefunden wurde (erzeuge hierfür einen crawljob)
+            if not download_link == None:
+                # Wenn das Release als bereits hinzugefügt in der Datenbank vermerkt wurde, logge dies und breche ab
+                if self.db.retrieve(key) == 'added' or self.db.retrieve(key) == 'dl':
+                    self.log_debug("%s - zweisprachiges Release ignoriert (bereits gefunden)" % key)
+                # Ansonsten speichere das Release als hinzugefügt in der Datenbank
+                else:
+                    # Logge gefundenes Release auch im RSScrawler (Konsole/Logdatei)
+                    self.log_info(key + " [Zweisprachig]")
+                    
+                    # Cutofffunktion um bei Retail Release den Listeneintrag zu entfernen
+                    if self.config.get('cutoff'):
+                        if self.config.get('enforcedl'):
+                            common.cutoff(key, '1')
+                        else:
+                            common.cutoff(key, '0')
+                
+                    # Schreibe Crawljob            
+                    common.write_crawljob_file(
+                        key,
+                        key,
+                        download_link,
+                        jdownloaderpath + "/folderwatch",
+                        "RSScrawler/Remux"
+                    ) and text.append(key)
+                    self.db.store(
+                        key,
+                        # Vermerke zweisprachiges Release entsprechend in der Datenbank
+                        'dl' if self.config.get('enforcedl') and '.dl.' in key.lower() else 'added',
+                        pattern
+                        )
+        # Wenn zuvor ein key dem Text hinzugefügt wurde (also ein Release gefunden wurde):
+        if len(text) > 0 and len(rsscrawler.get("pushbulletapi")) > 0:
+            # Löse Pushbullet-Benachrichtigung aus
+            common.Pushbullet(rsscrawler.get("pushbulletapi"),text)
+            return True
+                
+    def dl_search(self, feed, title, notdl_title):
+        ignore = "|".join(["\.%s(\.|-)" % p for p in self.config.get("ignore").lower().split(',')]) if not self.config.get("ignore") == "" else "^unmatchable$"
+            
+        s = re.sub(self.SUBSTITUTE,".",title).lower()
+        for post in feed.entries:
+            """Suche nach Titel"""
+            found = re.search(s,post.title.lower())
+            if found:
+                """Prüfe ob Release ignoriert werden soll (basierend auf ignore-Einstellung)"""
+                found = re.search(ignore,post.title.lower())
+                if found:
+                    # Wenn zu ignorierender Eintrag, logge diesen
+                    self.log_debug("%s - zweisprachiges Release ignoriert (basierend auf ignore-Einstellung)" %post.title)
+                    continue
+                yield (post.title, [post.link], title)
+                                
+
+    # Suchfunktion für Downloadlinks (auf der zuvor gefundenen Unterseite):
+    def _get_download_links(self, url, hosters_pattern=None):
+        print(url)
+        test = requests.post('http://warez-world.org/include/load.php', 'option=dl-1&pid=142638&ceck=sec')
+        print(test)
+        # Verhindere Überforderung des Servers
+        time.sleep(0.1)
+        # Definiere die zu durchsuchende Baumstruktur (auf Basis der Unterseite)
+        tree = html.fromstring(requests.get(url).content)
+        # Genaue Anweisung, wo die Links zu finden sind (Unterhalb des Download:/Mirror # Textes)
+        xpath = '//*[@id="content"]/span/div/div[2]//strong[contains(text(),"Download:") or contains(text(),"Mirror #")]/following-sibling::a[1]'
+        # Jeder link wird zurück gegeben, wenn kein Wunschhoster festgelegt wurde. Ansonsten werden nur Links zum Wunschhoster weitergegeben.
+        return [common.get_first(link.xpath('./@href')) for link in tree.xpath(xpath) if hosters_pattern is None or re.search(hosters_pattern, link.text, flags=re.IGNORECASE)]
+
+    # Periodische Aufgabe
+    @_restart_timer
+    def periodical_task(self):
+        # Leere/Definiere interne URL/Text-Arrays
+        urls = []
+        text = []
+            
+        # Definiere interne Suchliste auf Basis der MB_Filme Liste
+        self.allInfos = dict(
+            # Füge der Suche sämtliche Titel aus der MB_Filme Liste hinzu
+            set({key: value for (key, value) in self.getPatterns(
+                    self.readInput(self.filme),
+                    self.config.get('quality'),
+                    '.*',
+                    None
+                ).items()}.items()
+            )
+        )
+        
+        # Stoppe Suche, wenn Platzhalter aktiv ist.
+        if placeholder_filme:
+            return
+
+        # Wenn historical aktiv ist nutzt RSScrawler die Suchfunktion von MB, statt nur den (zeitlich begrenzten) Feed zu nutzen. Dies dauert etwas länger, durchsucht aber den kompletten MB!
+        if self.config.get("historical"):
+            # Suche nach jeder Zeile in der internen Suchliste
+            for xline in self.allInfos.keys():
+                # Wenn die Zeile nicht leer ist bzw. keine Raute (für Kommentare) enthält:
+                if len(xline) > 0 and not xline.startswith("#"):
+                    # Entferne Zusatzinfos der obsoleten Funktion, die Listeneinträge wie folgt erwartet: Titel,Auflösung,Gruppe
+                    # Die Suche Benötigt nur den Titel vor dem ersten Komma. Ersetze Weiterhin Punkte durch Leerzeichen und diese für die Suche durch ein +
+                    xn = xline.split(",")[0].replace(".", " ").replace(" ", "+")
+                    # Generiere aus diesen Suchurl-kompatiblen String als Seitenaufruf (entspricht einer Suche auf MB nach dem entsprechenden Titel) eine Liste an Suchanfragen-URLs (Anzahl entspricht Einträgen der internen Suchliste)
+                    urls.append('aHR0cDovL3dhcmV6LXdvcmxkLm9yZy9mZWVkLz9zPQ=='.decode('base64') + xn)
+        # Nutze ansonsten den Feed (und dessen Inhalt) als Grundlage zur Suche
+        else:
+            # Hierfür wird nur eine einzelne URL (die oben vergebene) benötigt
+            urls.append(self.FEED_URL)
+
+        # Suchfunktion für valide Releases (und deren Downloadlinks) wird für jede URL durchgeführt:
+        for url in urls:
+            # Führe für jeden Eintrag auf der URL eine Suche nach Releases durch:
+            for (key, value, pattern) in self.searchLinks(feedparser.parse(url)):
+                # Nimm nur den ersten validen Downloadlink der auf der Unterseite eines jeden Releases gefunden wurde
+                download_link = common.get_first(self._get_download_links(value[0], self._hosters_pattern))
+                # Füge Release nur hinzu, wenn überhaupt ein Link gefunden wurde (erzeuge hierfür einen crawljob)
+                if not download_link == None:
+                    # Suche nach zweisprachigem Release, sollte das aktuelle nicht zweisprachig sein:
+                    if self.config.get('enforcedl') and '.dl.' not in key.lower():
+                        # Wenn die Suche für zweisprachige Releases nichts findet (wird zugleich ausgeführt)
+                        if not self.download_dl(key):
+                            # Logge nicht gefundenes zweisprachiges Release
+                            self.log_debug("%s - Kein zweisprachiges Release gefunden" %key)
+                                
+                    # Wenn das Release als bereits hinzugefügt in der Datenbank vermerkt wurde, logge dies und breche ab
+                    if self.db.retrieve(key) == 'added' or self.db.retrieve(key) == 'notdl':
+                        self.log_debug("%s - Release ignoriert (bereits gefunden)" % key)
+                    # Ansonsten speichere das Release als hinzugefügt in der Datenbank
+                    else:
+                        # Logge gefundenes Release auch im RSScrawler (Konsole/Logdatei)
+                        self.log_info(key)
+                        
+                        # Entferne normale Filme nur, wenn diese die DL-Kriterien erfüllen bzw. enforcedl inaktiv ist.
+                        if (self.config.get('enforcedl') and '.dl.' in key.lower()) or not self.config.get('enforcedl'):
+                            # Cutofffunktion um bei Retail Release den Listeneintrag zu entfernen
+                            if self.config.get('cutoff') and '.COMPLETE.' not in key.lower():
+                                if self.config.get('enforcedl'):
+                                    common.cutoff(key, '1')
+                                else:
+                                    common.cutoff(key, '0')
+                                    
+                        # Schreibe Crawljob  
+                        common.write_crawljob_file(
+                            key,
+                            key,
+                            download_link,
+                            jdownloaderpath + "/folderwatch",
+                            "RSScrawler"
+                        ) and text.append(key)
+                        self.db.store(
+                            key,
+                            # Vermerke Releases, die nicht zweisprachig sind in der Datenbank (falls enforcedl aktiv ist). Speichere jedes gefundene Release
+                            'notdl' if self.config.get('enforcedl') and '.dl.' not in key.lower() else 'added',
+                            pattern
+                        )
+        # Wenn zuvor ein key dem Text hinzugefügt wurde (also ein Release gefunden wurde):
+        if len(text) > 0 and len(rsscrawler.get("pushbulletapi")) > 0:
+            # Löse Pushbullet-Benachrichtigung aus
+            common.Pushbullet(rsscrawler.get("pushbulletapi"),text)
 
 ## Hauptsektion
 if __name__ == "__main__":
@@ -1671,13 +1948,14 @@ if __name__ == "__main__":
 
     # Diese Klassen werden periodisch ausgeführt    
     pool = [
-        MB(),
-        MB3d(),
-        MBstaffeln(),
-        MBregex(),
-        SJ(),
-        SJregex(),
-        YouTube()
+        #MB(),
+        #MB3d(),
+        #MBstaffeln(),
+        #MBregex(),
+        #SJ(),
+        #SJregex(),
+        #YouTube(),
+        WW()
     ]
 
     # Hinweis, wie RSScrawler beendet werden kann
